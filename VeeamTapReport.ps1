@@ -7,23 +7,22 @@
     Veeam Tape Report is a script for Veeam Backup and Replication
     to assist operators to export and import tapes. This script 
     generate a report with a state of the tape infrastructure
-    and the list of the tapes to exports and the one to import
+    and the list of tapes to export and the one to import
     into the library.
-    Disable IO Module(s) -> use magasines to checkout tapes.
-    Activate the tape pool option "Take tape from Free pool"
 
     .EXAMPLE
-    .\MyVeeamReport.ps1
+    .\VeeamTapeReport.ps1
     Run script from (an elevated) PowerShell console  
   
     .NOTES
-    Author: Pierre-Benoit Gerber
+    Author: Pierre-Benoit Gerber / Athéo Ingénierie
     Last Updated: January 2025
-    Version: 1.10.1
+    Version: 2.0
   
     Requires :
-    Veeam Backup and Replication
-    Tape Library
+    Veeam Backup and Replication and Tape Library
+    Disable IO Module(s) in tape library configuration -> use magazines to export tapes.
+    Activate in all tape pools the option "Take tape from Free pool"
 #> 
 
 
@@ -51,52 +50,63 @@
 
 ## Region User-Variables
 
-# VBR Server (Server Name, FQDN or IP)
-$vbrServer = "localhost"
+# VBR Server (Server Name, FQDN, IP or localhost)
+$vbrServer = $env:computername
+# Report Title
+$rptTitle = "Veeam Tape Report"
+# Show VBR Server name in report header
+$showVBR = $true
+# HTML Report Width (Percent)
+$rptWidth = 97
+# HTML Table Odd Row color
+$oddColor = "#f0f0f0"
 
 # Save HTML output to a file
 $ExportFile = $true
 # HTML File output path and filename
-$ExportFolder = "C:\Scripts\VeeamTapeReport"
-$ExportFilename = "VeeamTapeReport.htm_$(Get-Date -format yyyyMMdd_hhmmss)"
+$ExportFolder = "C:\Scripts\VeeamTapeExport"
+$ExportFilename = "VeeamTapeExport.html"
 
-# Library list seprate by semi-collon
-$Libs = "MyLibrary1";"MyLibrary2"
+# Library list separated by semi-collon
+$Libs = "TS4300"
+
+# Determine tape location in left or right magazine
+#Give the library first right magazine slot ID to determine in wich magazine are located tapes (right or left)
+#To determine this slot ID: put one tape in the top left slot in the right magazine and execute the powershell command "(Get-VBRTapeMedium -name TAPE_NAME).location.SlotAddress"
+#Set to $Null to not determine in wich magazine are located tapes
+$LibFirstRightSlotID = "16" #IBM TS4300 3573-TL Base Controller Revision B000
+#$LibFirstRightSlotID = $null
 
 # MediaSets to be exported 
-#Set strings to be mached in the mediaset name separated by pipe |
+#Set strings to be mached in the mediaset name separated by pipe
 #Set to $Null to export all mediasets
-$MediaSetToCheckout = "Weekly|Monthly|Quarterly|Yearly"
-#$MediaSetToCheckout = $Null
+$MediaSetToExport = "Weekly|Monthly|Quarterly|Yearly"
+#$MediaSetToExport = $null
 
 # Free tapes threshold
+#Set Warning and Critical threshold for available free tapes in Free Media Pool
+#Basicaly you must have at least necessary free tapes count for full backup
 $WarningFreeTapeCount = "9"
 $CriticalFreeTapeCount = "7"
 
-
-# Afin de déterminer dans quel magasin se trouve chaque bande il faut renseinger le slot ID retourné par veeam (pas le même que la robotique) qui concerne la première bande du magasin de droite.
-# Commenter la variable ou la mettre à $null pour ne pas gérer les magasins.
-# 1. Repérer le numéro de la bande qui se trouve dans le slot en bas à gauche du magasin de droite à partir de la console de gestion de la robotique.
-# 2. Retrouver l'ID de Slot Veeam avec la commande (Get-VBRTapeMedium -name NOMBANDE).location.SlotAddress
-# Ici la valeur 16 pour une robotique IBM TS4300 de première génération dont tous les slots du bas sont inhibés
-#$VeeamFirstRightSlotID = $null
-$VeeamFirstRightSlotID = "16"
-
-# Configuration SMTP
-$sendEmail = $true
-$emailHost = "smtprelay.camacte.local"
-$emailPort = "25"
-$emailEnableSSL = $false
+# Email configuration
+#Send Email - $true or $false
+$sendEmail = $false
+$emailHost = "smtprelay.yourdomain.local"
 $emailUser = ""
 $emailPass = ""
-$emailFrom = "veeam@groupe-cam.com"
-$emailTo = "serviceit@groupe-cam.com,pierre-benoit.gerber@atheo.net"
-$emailSubject = "Gestion des bandes Veeam"
+$emailFrom = "VeeamTapeExport@yourdomain.local"
+$emailTo = "you@yourdomain.local"
+#Send report as attachment - $true or $false
+$emailAttach = $false
+
+
+## Script begining
 
 # Script version
-$Version = "v1.10.1"
+$Version = "v2.0"
 
-# Connection serveur VBR
+# VBR Server Connexion
 $OpenConnection = (Get-VBRServerSession).Server
 If ($OpenConnection -ne $vbrServer){
   Disconnect-VBRServer
@@ -108,146 +118,247 @@ If ($OpenConnection -ne $vbrServer){
   }
 }
 
-## Nombre de bandes Online dans le pool Free
-$FreePoolId = (Get-VBRTapeMediaPool -Name Free).id
-$TABFreeTapeCount = @()
-Foreach ($Lib in $Libs){
-    $LibId = (Get-VBRTapeLibrary -Name $Lib).id
-    $FreeTapeCount = (Get-VBRTapeMedium | Where-Object {$_.MediaPoolId -match $FreePoolId -and ($_.LibraryId -match $LibId) -and ($_.Location -Match "Slot" -or $_.Location -Match "Drive")}).count
-    $OBJFreeTape = New-Object System.Object
-    $OBJFreeTape | Add-Member -type NoteProperty -Name "Robotique" -Value $Lib
-    $OBJFreeTape | Add-Member -type NoteProperty -Name "Bandes Libres" -Value $FreeTapeCount
-    $TABFreeTapeCount += $OBJFreeTape
+# Toggle VBR Server name in report header
+If ($showVBR) {
+  $vbrName = "VBR Server - $vbrServer"
+} Else {
+  $vbrName = $null
 }
 
-## Liste des Jobs Tape en attente de bandes
-If (Get-VBRTapeJob | where {$_.LastState -eq "WaitingTape"}){
-    $WaitingTapeJob = Get-VBRTapeJob | where {$_.LastState -eq "WaitingTape"} | Select Name,FullBackupMediaPool,LastState
-    $emailSubject = "Gestion des bandes Veeam !!! Ajouter des bandes vierges !!!"
-}
-
-##Liste des Jobs Tape en cours
-$TABWorkgingTapeJobs = @()
-$WorkgingTapeJobs = Get-VBRTapeJob | where {$_.LastState -eq "Working"}
-Foreach ($WorkgingTapeJob in $WorkgingTapeJobs){
-        $OBJWorkgingTapeJob = New-Object System.Object
-        $OBJWorkgingTapeJob | Add-Member -type NoteProperty -Name "Nom" -Value $WorkgingTapeJob.Name
-        $OBJWorkgingTapeJob | Add-Member -type NoteProperty -Name "Pool de destination" -Value $WorkgingTapeJob.Target
-        $OBJWorkgingTapeJob | Add-Member -type NoteProperty -Name "Etat" -Value $WorkgingTapeJob.LastState
-        $TABWorkgingTapeJobs += $OBJWorkgingTapeJob
-}
-
-## Etat des lecteurs
+# Tape drives state
 $TABDriveState = @()
 Foreach ($Lib in $Libs){
     $LibId = (Get-VBRTapeLibrary -Name $Lib).id
     Foreach ($Drive in Get-VBRTapeDrive -Library $LibId ){
         $DriveState = Get-VBRTapeDrive -Name $Drive | Where-Object {$_.LibraryId -Match $LibId} | Select Name,SerialNumber,Enabled,State,Medium
         $OBJDrive = New-Object System.Object
-        $OBJDrive | Add-Member -type NoteProperty -Name "Robotique" -Value $Lib
-        $OBJDrive | Add-Member -type NoteProperty -Name "Lecteur" -Value $DriveState.Name
-        $OBJDrive | Add-Member -type NoteProperty -Name "Numéro de série" -Value $DriveState.SerialNumber
-        $OBJDrive | Add-Member -type NoteProperty -Name "Activé" -Value $DriveState.Enabled
-        $OBJDrive | Add-Member -type NoteProperty -Name "Etat" -Value $DriveState.State
-        $OBJDrive | Add-Member -type NoteProperty -Name "Média" -Value $DriveState.Medium
+        $OBJDrive | Add-Member -type NoteProperty -Name "Library" -Value $Lib
+        $OBJDrive | Add-Member -type NoteProperty -Name "Drive" -Value $DriveState.Name
+        $OBJDrive | Add-Member -type NoteProperty -Name "Serial Number" -Value $DriveState.SerialNumber
+        $OBJDrive | Add-Member -type NoteProperty -Name "Enabled" -Value $DriveState.Enabled
+        $OBJDrive | Add-Member -type NoteProperty -Name "State" -Value $DriveState.State
+        $OBJDrive | Add-Member -type NoteProperty -Name "Loaded tape" -Value $DriveState.Medium
         $TABDriveState += $OBJDrive
+        If ($DriveState.Enabled -ne $true) {$DriveDisabled = $true}
     }  
 }
 
-## Liste des bandes à externaliser
-$TABTapeOut = @()
+# Online free tape count
+$FreePoolId = (Get-VBRTapeMediaPool -Name Free).id
+$TABFreeTapeCount = @()
 Foreach ($Lib in $Libs){
     $LibId = (Get-VBRTapeLibrary -Name $Lib).id
-    $TapeOut = Get-VBRTapeMedium | Where-Object {$_.Location -Match "Slot" -and $_.LibraryId -Match $LibID -and $_.MediaSet -match $MediaSetToCheckout -and $_.MediaSet -ne $Null}
-    Foreach ($Tape in $TapeOut){    
-        $OBJTapeOut = New-Object System.Object
-        $OBJTapeOut | Add-Member -type NoteProperty -Name "Robotique" -Value $Lib
-        $OBJTapeOut | Add-Member -type NoteProperty -Name "Bande" -Value $Tape.Name
-        $OBJTapeOut | Add-Member -type NoteProperty -Name "Jeux" -Value $Tape.MediaSet
-        $OBJTapeOut | Add-Member -type NoteProperty -Name "N° de séquence" -Value $Tape.SequenceNumber
-        $OBJTapeOut | Add-Member -type NoteProperty -Name "Date d'Expiration" -Value $Tape.ExpirationDate
-        If ($VeeamFirstRightSlotID ){
-            If ((Get-VBRTapeMedium -name $Tape).location.SlotAddress -lt $VeeamFirstRightSlotID) {$OBJTapeOut | Add-Member -type NoteProperty -Name "Magasin" -Value "Left"}
-            If ((Get-VBRTapeMedium -name $Tape).location.SlotAddress -ge $VeeamFirstRightSlotID) {$OBJTapeOut | Add-Member -type NoteProperty -Name "Magasin" -Value "Right"}
+    $FreeTapeCount = (Get-VBRTapeMedium | Where-Object {$_.MediaPoolId -match $FreePoolId -and ($_.LibraryId -match $LibId) -and ($_.Location -Match "Slot" -or $_.Location -Match "Drive")}).count
+    $OBJFreeTape = New-Object System.Object
+    $OBJFreeTape | Add-Member -type NoteProperty -Name "Library" -Value $Lib
+    $OBJFreeTape | Add-Member -type NoteProperty -Name "Free Tapes" -Value $FreeTapeCount
+    $TABFreeTapeCount += $OBJFreeTape
+    If ($FreeTapeCount -le $CriticalFreeTapeCount) {
+        $FreeTapeCritical = $true
+    } Else { 
+        If ($FreeTapeCount -le $WarningFreeTapeCount) {
+        $FreeTapeWarning = $true
+           }
+    }
+}
+
+# Waiting Tape Job list
+$TABWaitingTapeJobs = @()
+$WaitingTapeJobs = Get-VBRTapeJob | where {$_.LastState -eq "WaitingTape"}
+Foreach ($WaitingTapeJob in $WaitingTapeJobs){
+        $OBJWaitingTapeJob = New-Object System.Object
+        $OBJWaitingTapeJob | Add-Member -type NoteProperty -Name "Tape Job " -Value $WaitingTapeJob.Name
+        #$OBJWaitingTapeJob | Add-Member -type NoteProperty -Name "Destination tape pool" -Value $WaitingTapeJob.FullBackupMediaPool
+        $OBJWaitingTapeJob | Add-Member -type NoteProperty -Name "Destination tape pool" -Value $WaitingTapeJob.Target
+        $OBJWaitingTapeJob | Add-Member -type NoteProperty -Name "State" -Value $WaitingTapeJob.LastState
+        $TABWaitingTapeJobs += $OBJWaitingTapeJob
+}
+
+# Running Tape Job List
+$TABWorkgingTapeJobs = @()
+$WorkgingTapeJobs = Get-VBRTapeJob | where {$_.LastState -eq "Working"}
+Foreach ($WorkgingTapeJob in $WorkgingTapeJobs){
+        $OBJWorkgingTapeJob = New-Object System.Object
+        $OBJWorkgingTapeJob | Add-Member -type NoteProperty -Name "Tape Job " -Value $WorkgingTapeJob.Name
+        $OBJWorkgingTapeJob | Add-Member -type NoteProperty -Name "Destination tape pool" -Value $WorkgingTapeJob.Target
+        $OBJWorkgingTapeJob | Add-Member -type NoteProperty -Name "State" -Value $WorkgingTapeJob.LastState
+        $TABWorkgingTapeJobs += $OBJWorkgingTapeJob
+}
+
+
+# Tape list to be exported
+$TABTapeExport = @()
+Foreach ($Lib in $Libs){
+    $LibId = (Get-VBRTapeLibrary -Name $Lib).id
+    $TapeExport = Get-VBRTapeMedium | Where-Object {$_.Location -Match "Slot" -and $_.LibraryId -Match $LibID -and $_.MediaSet -match $MediaSetToExport -and $_.MediaSet -ne $Null}
+    Foreach ($Tape in $TapeExport){    
+        $OBJTapeExport = New-Object System.Object
+        $OBJTapeExport | Add-Member -type NoteProperty -Name "Library" -Value $Lib
+        $OBJTapeExport | Add-Member -type NoteProperty -Name "Tape Name" -Value $Tape.Name
+        $OBJTapeExport | Add-Member -type NoteProperty -Name "Media Set" -Value $Tape.MediaSet
+        $OBJTapeExport | Add-Member -type NoteProperty -Name "Sequence Number" -Value $Tape.SequenceNumber
+        $OBJTapeExport | Add-Member -type NoteProperty -Name "Expiration Date" -Value $Tape.ExpirationDate
+        If ($LibFirstRightSlotID ){
+            If ((Get-VBRTapeMedium -name $Tape).location.SlotAddress -lt $LibFirstRightSlotID) {$OBJTapeEXport | Add-Member -type NoteProperty -Name "Magazine" -Value "Left"}
+            If ((Get-VBRTapeMedium -name $Tape).location.SlotAddress -ge $LibFirstRightSlotID) {$OBJTapeEXport | Add-Member -type NoteProperty -Name "Magazine" -Value "Right"}
         }
-        $TABTapeOut += $OBJTapeOut
+        $TABTapeExport += $OBJTapeExport    }
+}
+
+# Tape list that could be imported into the library
+$TABTapeImport = @()
+$TapeImport = Get-VBRTapeMedium | Where-Object {$_.Location -Match "Vault" -and $_.IsExpired -Match "True" -and $_.ProtectedBySoftware -Match "False"}
+Foreach ($Tape in $TapeImport){
+        $OBJTapeImport = New-Object System.Object
+        $OBJTapeImport | Add-Member -type NoteProperty -Name "Tape Name" -Value $Tape.Name
+        $OBJTapeImport | Add-Member -type NoteProperty -Name "Media Set" -Value $Tape.MediaSet
+        $OBJTapeImport | Add-Member -type NoteProperty -Name "Expirated" -Value $Tape.IsExpired
+        $OBJTapeImport | Add-Member -type NoteProperty -Name "Expiration Date" -Value $Tape.ExpirationDate
+        $TABTapeImport += $OBJTapeImport
+}
+
+## HTML formatting
+
+$HtmlHeaderObj = @"
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+        <title>$rptTitle</title>
+            <style type="text/css">
+              body {font-family: Tahoma; background-color: #ffffff;}
+              table {font-family: Tahoma; width: $($rptWidth)%; font-size: 12px; border-collapse: collapse; margin-left: auto; margin-right: auto;}
+              table tr:nth-child(odd) td {background: $oddColor;}
+              th {background-color: #e2e2e2; border: 1px solid #a7a9ac;border-bottom: none;}
+              td {background-color: #ffffff; border: 1px solid #a7a9ac;padding: 2px 3px 2px 3px;}
+            </style>
+    </head>
+"@
+
+$HtmlBodyTop = @"
+    <body>
+          <table>
+              <tr>
+                  <td style="width: 50%;height: 14px;border: none;background-color: #00b050;color: White;font-size: 10px;vertical-align: bottom;text-align: left;padding: 2px 0px 0px 5px;"></td>
+                  <td style="width: 50%;height: 14px;border: none;background-color: #00b050;color: White;font-size: 12px;vertical-align: bottom;text-align: right;padding: 2px 5px 0px 0px;">Report generated on $(Get-Date -format g)</td>
+              </tr>
+              <tr>
+                  <td style="width: 50%;height: 24px;border: none;background-color: #00b050;color: White;font-size: 24px;vertical-align: bottom;text-align: left;padding: 0px 0px 0px 15px;">$rptTitle</td>
+                  <td style="width: 50%;height: 24px;border: none;background-color: #00b050;color: White;font-size: 12px;vertical-align: bottom;text-align: right;padding: 0px 5px 2px 0px;">$vbrName</td>
+              </tr>
+          </table>
+"@
+
+$HtmlSubHead01 = @"
+<table>
+                <tr>
+                    <td style="height: 35px;background-color: #f3f4f4;color: #626365;font-size: 16px;padding: 5px 0 0 15px;border-top: 5px solid white;border-bottom: none;">
+"@
+
+$HtmlSubHead01suc = @"
+<table>
+                 <tr>
+                    <td style="height: 35px;background-color: #00b050;color: #626365;font-size: 16px;padding: 5px 0 0 15px;border-top: 5px solid white;border-bottom: none;">
+"@
+
+$HtmlSubHead01war = @"
+<table>
+                 <tr>
+                    <td style="height: 35px;background-color: #ffd96c;color: #626365;font-size: 16px;padding: 5px 0 0 15px;border-top: 5px solid white;border-bottom: none;">
+"@
+
+$HtmlSubHead01err = @"
+<table>
+                <tr>
+                    <td style="height: 35px;background-color: #FB9895;color: #626365;font-size: 16px;padding: 5px 0 0 15px;border-top: 5px solid white;border-bottom: none;">
+"@
+
+$HtmlSubHead01inf = @"
+<table>
+                <tr>
+                    <td style="height: 35px;background-color: #3399FF;color: #626365;font-size: 16px;padding: 5px 0 0 15px;border-top: 5px solid white;border-bottom: none;">
+"@
+
+$HtmlSubHead02 = @"
+</td>
+                </tr>
+             </table>
+"@
+
+$HTMLbreak = @"
+<table>
+                <tr>
+                    <td style="height: 10px;background-color: #626365;padding: 5px 0 0 15px;border-top: 5px solid white;border-bottom: none;"></td>
+						    </tr>
+            </table>
+"@
+
+$HtmlFooterObj = @"
+            <table>
+                <tr>
+                    <td style="height: 15px;background-color: #ffffff;border: none;color: #626365;font-size: 10px;text-align:center;">My Veeam Report developed by <a href="http://blog.smasterson.com" target="_blank">http://blog.smasterson.com</a> and modified for V11 by <a href="http://horstmann.in" target="_blank">http://horstmann.in</a></td>
+                </tr>
+            </table>
+    </body>
+</html>
+"@
+
+$HtmlFooterObj = @"
+            <table>
+                <tr>
+                    <td style="height: 15px;background-color: #ffffff;border: none;color: #626365;font-size: 10px;text-align:center;">Veeam Tape Report developed by <a href="http://blog.smasterson.com" target="_blank">http://blog.smasterson.com</a> and modified for V11 by <a href="http://horstmann.in" target="_blank">http://horstmann.in</a></td>
+                </tr>
+            </table>
+    </body>
+</html>
+"@
+
+
+If ($FreeTapeCritical) {
+    $HtmlFreeTapeCount = $HtmlSubHead01err + "Available Free tapes in each Library:" + ($TABFreeTapeCount | ConvertTo-Html -Fragment) + $HtmlSubHead02
+}
+Else{
+    If ($FreeTapeWarning) {
+    $HtmlFreeTapeCount = $HtmlSubHead01war + "Available Free tapes in each Library:" + ($TABFreeTapeCount | ConvertTo-Html -Fragment) + $HtmlSubHead02
     }
+    Else {$HtmlFreeTapeCount = $HtmlSubHead01 + "Available Free tapes in each Library:" + ($TABFreeTapeCount | ConvertTo-Html -Fragment) + $HtmlSubHead02}
 }
 
-#Liste des bandes pouvant être intégrées dans la ou les robotiques
-$TABTapeIn = @()
-$TapeIn = Get-VBRTapeMedium | Where-Object {$_.Location -Match "Vault" -and $_.IsExpired -Match "True" -and $_.ProtectedBySoftware -Match "False"}
-Foreach ($Tape in $TapeIn){
-        $OBJTapeIn = New-Object System.Object
-        $OBJTapeIn | Add-Member -type NoteProperty -Name "Bande" -Value $Tape.Name
-        $OBJTapeIn | Add-Member -type NoteProperty -Name "Jeux" -Value $Tape.MediaSet
-        $OBJTapeIn | Add-Member -type NoteProperty -Name "Expirée" -Value $Tape.IsExpired
-        $OBJTapeIn | Add-Member -type NoteProperty -Name "Date d'Expiration" -Value $Tape.ExpirationDate
-        $TABTapeIn += $OBJTapeIn
-}
-
-## Compilation des données et mise en forme HTML
-
-#If ($FreeTapeCount -le $CriticalFreeTapeCount){
-#    $HtmlFreeTapeCount = "<p><span style='color:RED'>" + "Nombre de bandes intégrées dans la robotique et dans le pool Free: " + $FreeTapeCount +  "<br />Ajouter des bandes dès que possible!!!</span></p>"
-#}
-#ElseIf ($FreeTapeCount -gt $WarningFreeTapeCount){
-#        $HtmlFreeTapeCount = "<p><span style='color:GREEN'>" + "Nombre de bandes intégrées dans la robotique et dans le pool Free: " + $FreeTapeCount +  "</span></p>"
-#}
-#Else {$HtmlFreeTapeCount = "<p><span style='color:ORANGE'>" + "Nombre de bandes intégrées dans la robotique et dans le pool Free: " + $FreeTapeCount +  "<br />Ajouter des bandes dès que possible.</span></p>"}
-$HtmlFreeTapeCount = $TABFreeTapeCount | ConvertTo-Html -Fragment
-$HtmlFreeTapeCount = "<p><span style='color:BLACK'>" + "<b>Nombre de bandes dans le pool Free intégrées dans chaque robotique:</b>" + "</span></p>" + $HtmlFreeTapeCount
-
-If ($WaitingTapeJob){ 
-    $HtmlWaitingTapeJob = $WaitingTapeJob| ConvertTo-Html -Fragment
-    $HtmlWaitingTapeJob = $HtmlWaitingTapeJob.Replace("<td>WaitingTape","<td style='color:RED'><b>WaitingTape</b>")
-    $HtmlWaitingTapeJob = "<p><span style='color:RED'>" + "<b>Liste des Jobs Tape en attente de bandes:</b>"  + "</span></p>" + $HtmlWaitingTapeJob
+If ($DriveDisabled){
+    $HtmlDriveState = $HtmlSubHead01err + "Tape drive state error" + $HtmlDriveState + ($TABDriveState | ConvertTo-Html -Fragment) + $HtmlSubHead02
 }
 Else {
-    If ($TABWorkgingTapeJobs){
-        $HtmlWorkgingTapeJob = $TABWorkgingTapeJobs | ConvertTo-Html -Fragment
-        $HtmlWorkgingTapeJob = $HtmlWorkgingTapeJob.Replace("<td>Working","<td style='color:ORANGE'>Working")
-        $HtmlWorkgingTapeJob = "<p><span style='color:BLACK'>" + "<b>Liste des Jobs Tape en cours:</b>" + "</span></p>" + $HtmlWorkgingTapeJob
-    }
-    Else {$HtmlWorkgingTapeJob = "<p><span style='color:BLACK'>" + "<b>Aucun Job Tape en cours.</b>" + "</span></p>"}
+    $HtmlDriveState = $HtmlSubHead01 + "Tape drive state" + ($TABDriveState | ConvertTo-Html -Fragment) + $HtmlSubHead02
 }
 
-$HtmlDriveState = $TABDriveState | ConvertTo-Html -Fragment
-$HtmlDriveState = $HtmlDriveState.Replace("<td>False","<td style='color:RED'>False")
-$HtmlDriveState = "<p><span style='color:BLACK'>" + "<b>Etat des lecteurs:</b>" + "</span></p>" + $HtmlDriveState
-
-If ($TABTapeOut){ 
-    $HtmlTapeOut = $TABTapeOut | ConvertTo-Html -Fragment
-    $HtmlTapeOut = "<p><span style='color:BLACK'>" + "<b>Liste des bandes à externaliser:</b>" + "</span></p>" + $HtmlTapeOut
+If ($TABWaitingTapeJobs){ 
+    $HtmlWaitingTapeJob = $HtmlSubHead01err + "Jobs waiting for free tapes" + ($TABWaitingTapeJobs| ConvertTo-Html -Fragment) + $HtmlSubHead02
 }
 Else {
-    $HtmlTapeOut = "<p><span style='color:BLACJ'>" + "<b>Aucune bande à externaliser.</b>" + "</span></p>"
-}
-
-If ($TABTapeIn){ 
-    $HtmlTapeIn = $TABTapeIn | ConvertTo-Html -Fragment
-    $HtmlTapeIn = "<p><span style='color:BLACK'>" + "<b>Liste des bandes pouvant être intégrées dans la robotique:</b>" + "</span></p>" + $HtmlTapeIn
-    if (($TapeIn).count -le $CriticalFreeTapeCount -and $FreeTapeCount -le $CriticalFreeTapeCount) {$HtmlTapeIn = "$HtmlTapeIn" + "<p><span style='color:ORANGE'>" + "<b>Le nombre de bandes expirées à intégrer ou disponibles dans le pool Free est faible, si nécessaire intégrer des bandes vierges</b>" + "</span></p>"}
-}
-Else {
-    if ($FreeTapeCount -le $CriticalFreeTapeCount){
-        $HtmlTapeIn = "<p><span style='color:RED'>" + "<b>Aucune bande expirée dans les pools et nombre faible de bandes disponibles dans le pool Free, insérer des bandes vierges si nécessaire.</b>" + "</span></p>"
+    If ($TABWorkingTapeJobs){
+        $HtmlWorkingTapeJob = $HtmlSubHead01warn + "Running Tape Jobs" + ($TABWorkingTapeJobs| ConvertTo-Html -Fragment) + $HtmlSubHead02
     }
+    Else {$HtmlWorkgingTapeJob = $HtmlSubHead01 + "No running Tape Job" + $HtmlSubHead02}
 }
 
-$HtmlHeader = '<html lang="fr"><head><meta charset="utf-8" />'
-$HtmlHeader = $HtmlHeader  + '<title>Gestion des bandes Veeam</title>'
-$HtmlHeader = $HtmlHeader  + '<style type="text/css">body{font-family: Tahoma}</style>'
-$HtmlHeader = $HtmlHeader  + '<link rel="stylesheet" href="style.css"><script src="script.js"></script></head>'
-$HtmlBody = "<body>" + $HtmlFreeTapeCount + $HtmlWorkgingTapeJob + $HtmlWaitingTapeJob + $HtmlDriveState + $HtmlTapeOut + $HtmlTapeIn + "</body>"
-$HtmlFooter = '<footer><p>Athéo Ingénierie - PBG - ' + $Version + '<br /><a href="#">https://www.atheo.net</a></p></footer></html>'
-$HtmlOutput = $HtmlHeader + $HTMLBody + $HtmlFooter
 
-#Optimisations du format HTML
-$HtmlOutput = $HtmlOutput.Replace("<table>","<table border=1 cellspacing=0 cellpadding=10>")
-$HtmlOutput = $HtmlOutput.Replace("<tr><th>","<tr bgcolor='Silver'><th>")
+If ($TABTapeExport){ 
+        $HtmlTapeExport = $HtmlSubHead01 + "Tape(s) to export:" + ($TABTapeExport | ConvertTo-Html -Fragment) + $HtmlSubHead02
+}
+Else {$HtmlTapeExport = $HtmlSubHead01 + "No tape to export" + $HtmlSubHead02}
 
-#Export du fichier HTML
+If ($TABTapeImport){ 
+        $HtmlTapeImport = $HtmlSubHead01 + "Tape(s) that can be imported" + ($TABTapeImport | ConvertTo-Html -Fragment) + $HtmlSubHead02
+}
+Else {$HtmlTapeImport = $HtmlSubHead01 + "No tape to import - Consider importing new Free tapes" + $HtmlSubHead02}
+
+$HtmlOutput = $HtmlHeaderObj + $HtmlBodyTop + $HtmlFreeTapeCount + $HtmlDriveState + $HtmlWaitingTapeJob + $HtmlWorkingTapeJob + $HtmlTapeExport + $HtmlTapeImport + $HtmlFooterObj
+
+#HTML formatting optimisations
+#$HtmlOutput = $HtmlOutput.Replace("<table>","<table border=1 cellspacing=0 cellpadding=10>")
+#$HtmlOutput = $HtmlOutput.Replace("<tr><th>","<tr bgcolor='Silver'><th>")
+
+#HTML file export
 if ($ExportFile){
     $HtmlOutput | Out-File -FilePath $ExportFolder\$(get-date -f yyyy-MM-dd.HH-mm-s)_$ExportFilename
 }
